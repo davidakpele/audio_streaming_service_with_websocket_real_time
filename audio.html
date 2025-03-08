@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Audio Streaming</title>
+    <link href="./bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            padding: 20px;
+            background-color: #f8f9fa;
+        }
+        #messages {
+            border: 1px solid #ccc;
+            height: 200px;
+            overflow-y: auto;
+            padding: 10px;
+            background: #fff;
+        }
+        .participant-list {
+            list-style: none;
+            padding: 0;
+        }
+        .participant-list li {
+            padding: 10px;
+            background: #007bff;
+            color: white;
+            border-radius: 5px;
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2 class="text-primary">Live Audio Streaming</h2>
+        <button id="start" class="btn btn-success">Start Streaming</button>
+        <button id="stop" class="btn btn-danger" disabled>Stop Streaming</button>
+
+        <h3>Recording</h3>
+        <audio id="recorded-audio" controls class="d-block mb-2"></audio>
+        <button id="download" class="btn btn-primary" disabled>Download Recording</button>
+        <button id="share" class="btn btn-secondary" disabled>Share Recording</button>
+
+        <h3>Participants</h3>
+        <p id="participants-count" class="fw-bold">Participants: 0</p>
+        <ul id="participant-list" class="participant-list"></ul>
+
+        <h3>Event Info</h3>
+        <div id="event-info"></div>
+
+        <h3>Chat</h3>
+        <div id="chat-container">
+            <div id="messages"></div>
+            <input type="text" id="messageInput" class="form-control mt-2" placeholder="Type a message...">
+            <button onclick="sendMessage()" class="btn btn-primary mt-2">Send</button>
+        </div>
+    </div>
+
+    <script>
+        let socket;
+        let mediaRecorder;
+        let participants = {};
+        let userId = "677676";
+        let audioChunks = [];
+        let liveId;
+        let streamId;
+
+        document.getElementById("start").addEventListener("click", async () => {
+            socket = new WebSocket(`ws://127.0.0.1:8000/ws/stream/start/live/${userId}/`);
+            socket.onopen = () => console.log("WebSocket connected!");
+
+            socket.onmessage = async (event) => {
+                if (typeof event.data === "string") {
+                    try {
+                        const data = JSON.parse(event.data);
+                        handleEventData(data);
+                    } catch (error) {
+                        console.error("Error parsing WebSocket message:", error);
+                    }
+                }
+            };
+
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+
+            mediaRecorder.ondataavailable = async (event) => {
+                if (event.data.size > 0) {
+                    socket.send(await event.data.arrayBuffer());
+                    audioChunks.push(event.data);
+                }
+            };
+
+            mediaRecorder.start(100);
+            document.getElementById("start").disabled = true;
+            document.getElementById("stop").disabled = false;
+        });
+
+        function handleEventData(data) {
+            if(data!=null && data !=""){
+                liveId = data.event_id;
+                join_url = data.join_url;
+            }
+            if (data.event_id) {
+                document.getElementById("event-info").innerHTML = `<p><strong>Live Event Link:</strong> <a href="${data.join_url}" target="_blank">${data.join_url}</a></p>`;
+            }
+            if (data.type === "participant_count") {
+                document.getElementById("participants-count").innerText = `Participants: ${data.count}`;
+            }
+            if (data.type === "participant_joined") {
+               participants = { ...participants, [data.participantId]: data.username };
+               updateParticipantList();
+            }
+
+            if (data.type === "participant_left") {
+                const { [data.participantId]: _, ...updatedParticipants } = participants;
+                participants = updatedParticipants;
+                updateParticipantList();
+            }
+
+            if (data.type === "broadcast_message") {
+                const messageDiv = document.getElementById("messages");
+                messageDiv.innerHTML += `<p><strong>User:</strong> ${data.message}</p>`;
+                messageDiv.scrollTop = messageDiv.scrollHeight;
+            }
+        }
+
+        function updateParticipantList() {
+            console.log("Updating participant list:", participants); // Debugging
+            const list = document.getElementById("participant-list");
+            list.innerHTML = "";
+
+            Object.values(participants).forEach(username => {
+                const li = document.createElement("li");
+                li.textContent = username;
+                list.appendChild(li);
+            });
+
+            document.getElementById("participants-count").innerText = `Participants: ${Object.keys(participants).length}`;
+        }
+
+
+        function sendMessage() {
+            const message = document.getElementById("messageInput").value;
+            if (message && socket) {
+                socket.send(JSON.stringify({ type: "broadcast_message", message }));
+                document.getElementById("messages").innerHTML += `<p><strong>You:</strong> ${message}</p>`;
+                document.getElementById("messageInput").value = "";
+            }
+        }
+
+    document.getElementById("stop").addEventListener("click", () => {
+        if (mediaRecorder) {
+            mediaRecorder.stop();
+            mediaRecorder.onstop = () => {
+                const audioBlob = new Blob(audioChunks, { type: "audio/webm" });
+                const audioUrl = URL.createObjectURL(audioBlob);
+                document.getElementById("recorded-audio").src = audioUrl;
+
+                document.getElementById("download").disabled = false;
+                document.getElementById("share").disabled = false;
+
+                document.getElementById("download").addEventListener("click", () => {
+                    const a = document.createElement("a");
+                    a.href = audioUrl;
+                    a.download = `recording-${liveId}.webm`;
+                    a.click();
+                });
+
+                document.getElementById("share").addEventListener("click", async () => {
+                    if (navigator.share) {
+                        const file = new File([audioBlob], `recording-${liveId}.webm`, { type: "audio/webm" });
+                        try {
+                            await navigator.share({
+                                files: [file],
+                                title: "Live Stream Recording",
+                                text: "Listen to my live stream recording!",
+                            });
+                        } catch (error) {
+                            console.error("Sharing failed:", error);
+                        }
+                    } else {
+                        alert("Sharing is not supported on this browser.");
+                    }
+                });
+            };
+        }
+
+        if (socket) {
+            // Send the "stream_ended" message BEFORE closing the socket
+            socket.send(JSON.stringify({
+                type: "stream_ended",
+                event_id: streamId // Ensure `liveId` is correctly set
+            }));
+
+            setTimeout(() => {
+                socket.close();
+            }, 500); // Give time for the message to be sent before closing
+        }
+
+        document.getElementById("start").disabled = false;
+        document.getElementById("stop").disabled = true;
+    });
+
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

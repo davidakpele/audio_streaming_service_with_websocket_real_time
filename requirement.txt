@@ -1,0 +1,14 @@
+Django==5.1.6
+channels==4.2.0
+channels_redis==4.2.1
+daphne==3.0.2
+asgiref==3.8.1
+redis==5.2.1
+pydub==0.25.1
+soundfile==0.13.1
+sounddevice==0.5.1
+numpy==1.26.4
+psycopg2-binary==2.9.10  # If using PostgreSQL, remove if using another DB
+python-dotenv==1.0.1
+requests==2.32.3
+django-cors-headers==4.7.0  # If handling cross-origin requests
