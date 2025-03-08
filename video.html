@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Video Stream</title>
+</head>
+<body>
+    <h2>Live Video Streaming with Background Removal</h2>
+
+    <!-- Video Elements -->
+    <video id="video" autoplay></video>
+    <canvas id="canvas" style="display: none;"></canvas>
+    <img id="output" alt="Processed Video" />
+
+    <!-- Background Selection -->
+    <label for="bg-option">Choose Background:</label>
+    <select id="bg-option">
+        <option value="none">No Background Change</option>
+        <option value="color">Color Background</option>
+        <option value="image">Image Background</option>
+    </select>
+
+    <!-- Color Picker (Hidden by Default) -->
+    <input type="color" id="color-picker" style="display: none;" />
+
+    <!-- Upload Background Image (Hidden by Default) -->
+    <input type="file" id="bg-upload" accept="image/*" style="display: none;" />
+
+    <script>
+        const video = document.getElementById("video");
+        const output = document.getElementById("output");
+        const bgOption = document.getElementById("bg-option");
+        const colorPicker = document.getElementById("color-picker");
+        const bgUpload = document.getElementById("bg-upload");
+
+        // WebSocket URL (Ensure it matches Django routing)
+        const ws = new WebSocket("ws://127.0.0.1:8000/ws/video/stream/1/");
+
+        // Start webcam video stream
+        navigator.mediaDevices.getUserMedia({ video: true })
+            .then(stream => {
+                video.srcObject = stream;
+            })
+            .catch(err => console.error("Error accessing webcam:", err));
+
+        ws.onopen = () => {
+            console.log("WebSocket connection established");
+        };
+
+        // Receive and display processed video frames
+        ws.onmessage = event => {
+            try {
+                const data = JSON.parse(event.data);
+                if (data.frame) {
+                    output.src = `data:image/jpeg;base64,${data.frame}`; // Set processed frame
+                }
+            } catch (error) {
+                console.error("Error processing WebSocket message:", error);
+            }
+        };
+
+        ws.onclose = () => console.log("WebSocket closed");
+        ws.onerror = error => console.error("WebSocket error:", error);
+
+        // Handle background selection
+        bgOption.addEventListener("change", () => {
+            const choice = bgOption.value;
+
+            // Show/hide inputs based on choice
+            if (choice === "color") {
+                colorPicker.style.display = "block";
+                bgUpload.style.display = "none";
+            } else if (choice === "image") {
+                colorPicker.style.display = "none";
+                bgUpload.style.display = "block";
+            } else {
+                colorPicker.style.display = "none";
+                bgUpload.style.display = "none";
+                ws.send(JSON.stringify({ background_type: "none" })); // Reset background
+            }
+        });
+
+        // Handle color selection
+        colorPicker.addEventListener("input", () => {
+            const color = colorPicker.value;
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ background_type: "color", background_color: color }));
+                console.log("Color background sent to server:", color);
+            }
+        });
+
+        // Handle background image upload
+        bgUpload.addEventListener("change", event => {
+            const file = event.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = () => {
+                    const base64Image = reader.result.split(",")[1]; // Extract Base64 data
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ background_type: "image", background_image: base64Image }));
+                        console.log("Image background sent to server.");
+                    }
+                };
+                reader.readAsDataURL(file);
+            }
+        });
+    </script>
+</body>
+</html>
