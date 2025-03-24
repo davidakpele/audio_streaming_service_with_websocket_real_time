@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Streaming</title>
+    <link href="./bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            padding: 20px;
+            background-color: #f8f9fa;
+        }
+        #messages {
+            border: 1px solid #ccc;
+            height: 200px;
+            overflow-y: auto;
+            padding: 10px;
+            background: #fff;
+        }
+        .participant-list {
+            list-style: none;
+            padding: 0;
+        }
+        .participant-list li {
+            padding: 10px;
+            background: #007bff;
+            color: white;
+            border-radius: 5px;
+            margin-bottom: 5px;
+        }
+        #cameraPreview {
+            position: fixed;
+            bottom: 10px;
+            right: 10px;
+            width: 150px;
+            height: 100px;
+            border: 2px solid #007bff;
+            border-radius: 10px;
+            background: black;
+            display: none;
+            cursor: grab;
+        }
+
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2 class="text-primary">Live Streaming</h2>
+        <video id="cameraPreview" autoplay playsinline muted></video>
+        <button id="start" class="btn btn-success">Start Streaming</button>
+        <button id="stop" class="btn btn-danger" disabled>Stop Streaming</button>
+        <button id="toggleStream" class="btn btn-warning" disabled>Switch to Screen Sharing</button>
+        
+        <h3>Participants</h3>
+        <p id="participants-count" class="fw-bold">Participants: 0</p>
+        <ul id="participant-list" class="participant-list"></ul>
+
+        <h3>Event Info</h3>
+        <div id="event-info"></div>
+
+        <h3>Chat</h3>
+        <div id="chat-container">
+            <div id="messages"></div>
+            <input type="text" id="messageInput" class="form-control mt-2" placeholder="Type a message...">
+            <button onclick="sendMessage()" class="btn btn-primary mt-2">Send</button>
+        </div>
+    </div>
+
+    <script>
+        let socket;
+        let mediaRecorder;
+        let currentStream;
+        let isScreenSharing = false;
+        let participants = {};
+        let userId = "677676";
+        let liveId;
+        let cameraStream;
+        let cameraVideo = document.getElementById("cameraPreview");
+       let isCoHostJoin = false;
+let coHostUserId = null;
+        document.getElementById("start").addEventListener("click", async () => {
+            socket = new WebSocket(`ws://127.0.0.1:8000/ws/stream/start/live/${userId}/`);
+            socket.onopen = () => console.log("WebSocket connected!");
+
+            socket.onmessage = async (event) => {
+                if (typeof event.data === "string") {
+                    try {
+                        const data = JSON.parse(event.data);
+                        handleEventData(data);
+                    } catch (error) {
+                        console.error("Error parsing WebSocket message:", error);
+                    }
+                }
+            };
+
+            await startAudioStream();
+
+            document.getElementById("start").disabled = true;
+            document.getElementById("stop").disabled = false;
+            document.getElementById("toggleStream").disabled = false;
+        });
+
+        async function startAudioStream() {
+            stopCurrentStream();
+            currentStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const audioContext = new AudioContext();
+            const mediaStreamSource = audioContext.createMediaStreamSource(currentStream);
+            const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+            processor.onaudioprocess = (event) => {
+                const inputData = event.inputBuffer.getChannelData(0);
+                const int16Array = new Int16Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) {
+                    int16Array[i] = inputData[i] * 32767; // Convert float [-1,1] to Int16
+                }
+                socket.send(int16Array.buffer); // Send raw PCM data
+            };
+
+            mediaStreamSource.connect(processor);
+            processor.connect(audioContext.destination);
+        }
+
+        async function startScreenSharing() {
+            stopCurrentStream();
+
+            try {
+                // Get screen sharing stream (includes video & optional system audio)
+                currentStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+
+                // Capture microphone audio separately
+                const micStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 } });
+
+                if (micStream.getAudioTracks().length > 0) {
+                    currentStream.addTrack(micStream.getAudioTracks()[0]); // Merge mic audio into screen stream
+                }
+
+                // Set up screen video recording
+                mediaRecorder = new MediaRecorder(currentStream, { mimeType: "video/webm" });
+
+                mediaRecorder.ondataavailable = async (event) => {
+                    if (event.data.size > 0) {
+                        // Send video data
+                        socket.send(event.data);
+                    }
+                };
+
+                mediaRecorder.start(100);
+                isScreenSharing = true;
+                document.getElementById("toggleStream").innerText = "Switch to Audio";
+
+                // Notify backend that screen sharing started
+                socket.send(JSON.stringify({ type: "switching_to_screen_sharing", stream: "screen" }));
+
+                // Capture & send raw PCM audio
+                const audioContext = new AudioContext({ sampleRate: 16000 });
+                const micSource = audioContext.createMediaStreamSource(micStream);
+                const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                micSource.connect(processor);
+                processor.connect(audioContext.destination);
+
+                processor.onaudioprocess = (event) => {
+                    const inputBuffer = event.inputBuffer.getChannelData(0); // Mono PCM
+                    const int16Array = new Int16Array(inputBuffer.length);
+
+                    for (let i = 0; i < inputBuffer.length; i++) {
+                        int16Array[i] = inputBuffer[i] * 32768; // Convert float to int16
+                    }
+
+                    socket.send(int16Array.buffer); // Send PCM audio as raw binary
+                };
+
+                // Start camera feed overlay
+                cameraStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                cameraVideo.srcObject = cameraStream;
+                cameraVideo.style.display = "block";
+                makeDraggable(cameraVideo);
+            } catch (error) {
+                console.error("Error starting screen sharing:", error);
+            }
+        }
+
+        function stopCurrentStream() {
+            if (mediaRecorder) {
+                mediaRecorder.stop();
+            }
+            if (currentStream) {
+                currentStream.getTracks().forEach(track => track.stop());
+            }
+            if (cameraStream) {
+                cameraStream.getTracks().forEach(track => track.stop());
+            }
+            cameraVideo.style.display = "none";
+        }
+
+        document.getElementById("toggleStream").addEventListener("click", async () => {
+            if (isScreenSharing) {
+                await startAudioStream();
+            } else {
+                await startScreenSharing();
+            }
+        });
+
+        function handleEventData(data) {
+            if (data.event_id) {
+                liveId = data.event_id;
+                document.getElementById("event-info").innerHTML = `<p><strong>Live Event Link:</strong> <a href="${data.join_url}" target="_blank">${data.join_url}</a></p>`;
+            }
+
+            if (data.type === "participant_list") {
+                participants = {};
+                data.participants.forEach(participant => {
+                    participants[participant.user_id] = {
+                        username: participant.username,
+                        is_cohost: participant.is_cohost || false
+                    };
+                });
+                updateParticipantList();
+            }
+
+            if (data.type === "participant_count") {
+                document.getElementById("participants-count").innerText = `Participants: ${data.count}`;
+            }
+
+            if (data.type === "broadcast_message") {
+                const messageDiv = document.getElementById("messages");
+                messageDiv.innerHTML += `<p><strong>User:</strong> ${data.message}</p>`;
+                messageDiv.scrollTop = messageDiv.scrollHeight;
+            }
+
+            // Handle incoming message_broadcast messages
+            if (data.type === "message_broadcast") {
+                const messagesDiv = document.getElementById("messages");
+                messagesDiv.innerHTML += `<p><strong>${data.username}:</strong> ${data.message}</p>`;
+                messagesDiv.scrollTop = messagesDiv.scrollHeight; // Auto-scroll to latest message
+            }
+
+            if (data.type == "cohost_joined") {
+                 isCoHostJoin = true;
+                coHostUserId = data.user_id; 
+
+                if (participants[data.user_id]) {
+                    participants[data.user_id].is_cohost = true;
+                    updateParticipantList();
+                }
+            }
+
+            if (data.type === "cohost_left") {
+                 isCoHostJoin = false;
+                coHostUserId = null;
+                if (participants[data.user_id]) {
+                    participants[data.user_id].is_cohost = false;
+                    updateParticipantList();
+                }
+            }
+        }
+
+        function updateParticipantList() {
+    const list = document.getElementById("participant-list");
+    list.innerHTML = "";
+
+    Object.entries(participants).forEach(([id, participant]) => {
+        const li = document.createElement("li");
+        li.textContent = participant.username;
+        console.log(participant);
+
+        if (id === coHostUserId) {  // Check if the participant is the co-host
+            const removeCohostButton = document.createElement("button");
+            removeCohostButton.textContent = "Remove Co-host";
+            removeCohostButton.style.marginLeft = "10px";
+            removeCohostButton.onclick = () => removeCohost(id);
+            li.appendChild(removeCohostButton);
+        } else {
+            const inviteButton = document.createElement("button");
+            inviteButton.textContent = "Invite";
+            inviteButton.style.marginLeft = "10px";
+            inviteButton.onclick = () => sendInvite(id);
+            li.appendChild(inviteButton);
+        }
+
+        list.appendChild(li);
+    });
+
+    document.getElementById("participants-count").innerText = `Participants: ${Object.keys(participants).length}`;
+}
+
+        function sendInvite(userId) {
+            if (socket) {
+                socket.send(JSON.stringify({ type: "invite_cohost", user_id: userId }));
+            }
+        }
+
+        function sendMessage() {
+            const message = document.getElementById("messageInput").value;
+            if (message && socket) {
+                socket.send(JSON.stringify({ type: "broadcast_message", message }));
+                document.getElementById("messageInput").value = "";
+            }
+        }
+
+        document.getElementById("stop").addEventListener("click", () => {
+            stopCurrentStream();
+
+            if (socket) {
+                socket.send(JSON.stringify({ type: "stream_ended", event_id: liveId }));
+                setTimeout(() => socket.close(), 500);
+            }
+
+            document.getElementById("start").disabled = false;
+            document.getElementById("stop").disabled = true;
+            document.getElementById("toggleStream").disabled = true;
+        });
+
+        // Make video draggable
+        function makeDraggable(element) {
+            let posX = 0, posY = 0, lastX = 0, lastY = 0;
+            element.onmousedown = dragMouseDown;
+
+            function dragMouseDown(e) {
+                e.preventDefault();
+                lastX = e.clientX;
+                lastY = e.clientY;
+                document.onmouseup = closeDrag;
+                document.onmousemove = dragElement;
+            }
+
+            function dragElement(e) {
+                e.preventDefault();
+                posX = lastX - e.clientX;
+                posY = lastY - e.clientY;
+                lastX = e.clientX;
+                lastY = e.clientY;
+                element.style.top = (element.offsetTop - posY) + "px";
+                element.style.left = (element.offsetLeft - posX) + "px";
+            }
+
+            function closeDrag() {
+                document.onmouseup = null;
+                document.onmousemove = null;
+            }
+        }
+        
+        function removeCohost(userId) {
+            if (socket) {
+                socket.send(JSON.stringify({ type: "remove_cohost", user_id: userId }));
+                console.log(`Removed co-host: ${userId}`);
+            }
+        }
+
+    </script>
+    <script src="./bootstrap.bundle.min.js"></script>
+</body>
+</html>
