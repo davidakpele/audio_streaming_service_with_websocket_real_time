@@ -8,6 +8,9 @@ from channels.db import database_sync_to_async
 from django.utils.timezone import now
 from .models import Participant, Room, StreamType
 import logging
+import jwt
+import aiohttp
+from django.conf import settings
 
 # Redis connection
 redis_client = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=True)
@@ -28,34 +31,126 @@ class StreamingConsumer(AsyncWebsocketConsumer):
         self.event_id = self.scope_params.get("event_id", None)  # Event ID
         self.participant_id = self.scope_params.get("participantId", None)  # Participant ID
         self.username = self.scope_params.get("username", "Guest")  # Default username
+        
+        # Extract token from query params
+        jwt_token = self.scope["query_string"].decode().split("token=")[-1] if b"token=" in self.scope["query_string"] else None
 
         if self.user_id:
-            # Host starts a new stream
-            self.event_id = str(uuid.uuid4())
+            if not jwt_token:
+                await self.accept()  # Accept the connection first
+                await self.send(text_data=json.dumps({
+                    "type": "error",
+                    "message": "JWT token is missing. Authentication required.",
+                    "details": "Only authenticated users can access the platform."
+                }))
+                await self.close()
+                return
 
-            # Save to Room table
-            await self.create_room(self.event_id, self.user_id)
+            # Verify and decode JWT
+            try:
+                payload = jwt.decode(
+                    jwt_token, settings.JWT_SECRET_KEY, algorithms=['HS256'])
+                extracted_user_id = payload.get("user_id")
 
-            active_streams[self.event_id] = {
-                "host": self.user_id,
-                "status": "active",
-                "participants": {},
-                "chat_history": [],
-            }
-            self.room_group_name = f"user_audio_live_{self.event_id}"
+                if not extracted_user_id:
+                    await self.accept()
+                    await self.send(text_data=json.dumps({
+                        "type": "error",
+                        "message": "Invalid token",
+                        "details": "System cannot extract user ID from this token."
+                    }))
+                    await self.close()
+                    return
+            except jwt.ExpiredSignatureError:
+                await self.accept()
+                await self.send(text_data=json.dumps({
+                    "type": "error",
+                    "message": "Expired Token",
+                    "details": "Token has expired."
+                }))
+                await self.close()
+                return
+            except jwt.InvalidTokenError:
+                await self.accept()
+                await self.send(text_data=json.dumps({
+                    "type": "error",
+                    "message": "Invalid token",
+                    "details": "Invalid token."
+                }))
+                await self.close()
+                return
 
-            # Add host to WebSocket group
-            await self.channel_layer.group_add(self.room_group_name, self.channel_name)
-            await self.channel_layer.group_add(f"user_{self.user_id}", self.channel_name) 
-            await self.accept()
+            # Fetch user details from authentication API
+            redis_user = redis_client.get(f"user:{self.user_id}")
 
-            # Generate and send the streaming link
-            stream_link = await self.generate_streaming_link()
-            await self.send(text_data=json.dumps({
-                "type": "stream_link",
-                "event_id": self.event_id,
-                "join_url": stream_link
-            }))
+            if redis_user:
+                user_details = json.loads(redis_user)
+            else:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(f"http://localhost:8001/api/v1/user/id/{extracted_user_id}") as response:
+                        if response.status != 200:
+                            await self.accept()
+                            await self.send(json.dumps({
+                                "status":302,
+                                "type": "error",
+                                "message": "User not found",
+                                "details": "Sorry. You currenctly not registered in our system."
+                            }))
+                            await self.close()
+                            return
+
+                        user_data = await response.json()
+                        user_details = user_data.get("data", {})
+                        fetched_user_id = str(user_details.get("id"))
+                        host_username = user_details.get("username", "Host")
+
+                        broadcaster_data = {
+                            "user_id": fetched_user_id,
+                            "username": host_username,
+                        }
+
+                        if fetched_user_id != str(self.user_id):
+                            await self.accept()
+                            await self.send(json.dumps({
+                                "status":401,
+                                "type": "error",
+                                "message": "Unauthorized User.",
+                                "details": "Your request Id does not match with our verified user id."
+                                }))
+                            await self.close()
+                            return
+
+                        redis_client.set(
+                            f"broadcaster:{extracted_user_id}", json.dumps(broadcaster_data))
+
+                        # Accept the connection before sending anything
+                        await self.accept()
+
+                        # Host starts a new stream
+                        self.event_id = str(uuid.uuid4())
+
+                        # Save to Room table
+                        await self.create_room(self.event_id, self.user_id)
+
+                        active_streams[self.event_id] = {
+                            "host": self.user_id,
+                            "status": "active",
+                            "participants": {},
+                            "chat_history": [],
+                        }
+                        self.room_group_name = f"user_audio_live_{self.event_id}"
+
+                        # Add host to WebSocket group
+                        await self.channel_layer.group_add(self.room_group_name, self.channel_name)
+                        await self.channel_layer.group_add(f"user_{self.user_id}", self.channel_name)
+
+                        # Generate and send the streaming link
+                        stream_link = await self.generate_streaming_link()
+                        await self.send(text_data=json.dumps({
+                            "type": "stream_link",
+                            "event_id": self.event_id,
+                            "join_url": stream_link
+                        }))
 
         elif self.event_id is not None:
             # Participant joins existing stream
@@ -267,8 +362,8 @@ class StreamingConsumer(AsyncWebsocketConsumer):
                                 "message": f"{username} has left the live stream."
                             }
                         )
-                         
-                         # Remove participant from active streams
+
+                        # Remove participant from active streams
                         del active_streams[self.event_id]["participants"][participant_id]
 
                         # Broadcast updated participant list
@@ -288,16 +383,17 @@ class StreamingConsumer(AsyncWebsocketConsumer):
                     await self.switch_streaming_mode(event_type)
 
                 elif event_type in ["text", "broadcast_message"]:
-                    if (self.channel_name == active_streams[self.event_id]["host"] or
-                            self.channel_name in active_streams[self.event_id].get("cohosts", {})):
+                    #  If you want to controller audience messages to only allow host and co host to communicate in message then you can comment this out, let the if condition controll the action below
+                    # if (self.channel_name == active_streams[self.event_id]["host"] or
+                    #         self.channel_name in active_streams[self.event_id].get("cohosts", {})):
 
-                        text_message = data.get("message", "").strip()
-                        await self.send_message_to_room(text_message, self.username, self.participant_id)
-                    else:
-                        await self.send(text_data=json.dumps({
-                            "type": "error",
-                            "message": "Only the broadcaster and co-hosts can speak."
-                        }))
+                    text_message = data.get("message", "").strip()
+                    await self.send_message_to_room(text_message, self.username, self.participant_id)
+                    # else:
+                    #     await self.send(text_data=json.dumps({
+                    #         "type": "error",
+                    #         "message": "Only the broadcaster and co-hosts can speak."
+                    #     }))
 
                 elif event_type == "webrtc_offer":
                     await self.channel_layer.group_send(
@@ -697,7 +793,7 @@ class StreamingConsumer(AsyncWebsocketConsumer):
         """Notify participants that the stream has ended."""
         await self.send(text_data=json.dumps({"type": "stream_ended", "message": event["message"]}))
         await self.close()
-
+            
     @database_sync_to_async
     def room_exists(self):
         return Room.objects.filter(room_id=self.event_id).exists()

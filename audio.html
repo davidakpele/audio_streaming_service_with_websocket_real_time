@@ -76,31 +76,32 @@
         let currentStream;
         let isScreenSharing = false;
         let participants = {};
-        let userId = "677676";
+        let userId = "1";
         let liveId;
         let cameraStream;
         let cameraVideo = document.getElementById("cameraPreview");
         let isCoHostJoin = false;
         let coHostUserId = null;
         let coHostUsername = null;
-        
+        let token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlcyI6WyJVU0VSIl0sInVzZXJfaWQiOjEsImV4cCI6MTc0Mjk1MDY2NywiaWF0IjoxNzQyODY0MjY3fQ.G-rv0LC6LVv5_sh97rm9zrkx28dGZaoU6ycsTXnQblA"; 
+
         document.getElementById("start").addEventListener("click", async () => {
-            socket = new WebSocket(`ws://127.0.0.1:8000/ws/stream/start/live/${userId}/`);
+            socket = new WebSocket(`ws://127.0.0.1:8000/ws/stream/start/live/${userId}/?token=${encodeURIComponent(token)}`);
             socket.onopen = () => console.log("WebSocket connected!");
 
             socket.onmessage = async (event) => {
                 if (typeof event.data === "string") {
                     try {
                         const data = JSON.parse(event.data);
+                        if (data.type === "stream_link") {
+                            await startAudioStream();
+                        }
                         handleEventData(data);
                     } catch (error) {
                         console.error("Error parsing WebSocket message:", error);
                     }
                 }
             };
-
-            await startAudioStream();
-
             document.getElementById("start").disabled = true;
             document.getElementById("stop").disabled = false;
             document.getElementById("toggleStream").disabled = false;
@@ -249,6 +250,7 @@
                 if (participants[data.participant_id]) {
                     updateParticipantList();
                 }
+                $.jGrowl(data.message, { life: 10000});
             }
 
             if (data.type === "cohost_left") {
@@ -258,6 +260,7 @@
                     participants[data.user_id].is_cohost = false;
                     updateParticipantList();
                 }
+                $.jGrowl(data.message, { life: 10000});
             }
 
             if (data.type == "cohost_removed") {
@@ -266,12 +269,17 @@
                 if (data.participant_id === coHostUserId) {
                     coHostUserId = null;
                 }
+                $.jGrowl(data.message, { life: 10000});
                 updateParticipantList();
             }
 
             if(data.type === "participant_left"){
                 updateParticipantList();
                 $.jGrowl(data.message, { life: 10000});
+            }
+
+            if(data.type === "error"){
+                $.jGrowl(data.details, { life: 10000});
             }
         }
 
@@ -287,10 +295,12 @@
                     const removeCohostButton = document.createElement("button");
                     removeCohostButton.textContent = "Remove Co-host";
                     removeCohostButton.style.marginLeft = "10px";
+                    removeCohostButton.classList.add("btn", "btn-danger", "btn-xs");
                     removeCohostButton.onclick = () => removeCohost(id);
                     li.appendChild(removeCohostButton);
                 } else {
                     const inviteButton = document.createElement("button");
+                    inviteButton.classList.add("btn", "btn-secondary", "btn-xs");
                     inviteButton.textContent = "Invite";
                     inviteButton.style.marginLeft = "10px";
                     inviteButton.onclick = () => sendInvite(id);
