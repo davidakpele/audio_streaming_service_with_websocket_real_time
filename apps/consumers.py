@@ -17,6 +17,7 @@ SWITCH_TO_AUDIO = "switching_to_audio"
 SWITCH_TO_SCREEN_SHARING = "switching_to_screen_sharing"
 
 active_streams = {}  # Store active streams
+active_audio_streams = {}
 logger = logging.getLogger(__name__)
 
 class StreamingConsumer(AsyncWebsocketConsumer):
@@ -45,7 +46,7 @@ class StreamingConsumer(AsyncWebsocketConsumer):
 
             # Add host to WebSocket group
             await self.channel_layer.group_add(self.room_group_name, self.channel_name)
-            await self.channel_layer.group_add(f"user_{self.user_id}", self.channel_name)  # Add to personal group
+            await self.channel_layer.group_add(f"user_{self.user_id}", self.channel_name) 
             await self.accept()
 
             # Generate and send the streaming link
@@ -188,6 +189,7 @@ class StreamingConsumer(AsyncWebsocketConsumer):
                             {
                                 "type": "cohost_joined",
                                 "participant_id": self.participant_id,
+                                "username": self.username,
                                 "message": f"{self.username} is now a co-host."
                             }
                         )
@@ -205,8 +207,6 @@ class StreamingConsumer(AsyncWebsocketConsumer):
                     if cohost_key:
                         del cohosts[cohost_key]  # Remove co-host
 
-                        # Confirm removal
-                        print(f"DEBUG: Cohost {participant_id_str} removed.")
                          # Notify all users
                         await self.channel_layer.group_send(
                             self.room_group_name, 
@@ -218,45 +218,71 @@ class StreamingConsumer(AsyncWebsocketConsumer):
                             }
                         )
                        
-                        
                     else:
                         print(f"DEBUG: Cohost {participant_id_str} not found in cohosts.")
 
                 elif event_type == "remove_cohost":
-                    if self.event_id in active_streams:
-                        cohosts = active_streams[self.event_id].get("cohosts", {})
+                    cohosts = active_streams[self.event_id].get("cohosts", {})
 
-                        # Convert participant_id to string for consistency
-                        participant_id_str = str(self.participant_id)
+                    # Convert participant_id to string for consistency
+                    participant_id_str = str(data.get("participant_id"))
+                    participant_username_str = str(data.get("username"))
 
-                        # Find the cohost key
-                        cohost_key = next((key for key, value in cohosts.items() if str(
-                            value.get("participant_id")) == participant_id_str), None)
+                    # Find the cohost key
+                    cohost_key = next((key for key, value in cohosts.items() if str(value.get("participant_id")) == participant_id_str), None)
 
-                        if cohost_key:
-                            del cohosts[cohost_key]  # Remove co-host
+                    if cohost_key:
+                        del cohosts[cohost_key]  # Remove co-host
 
-                            # Confirm removal
-                            print(f"DEBUG: Cohost {participant_id_str} removed.")
-
-                            # Notify all users
-                            await self.channel_layer.group_send(
-                                self.room_group_name,
-                                {
-                                    "type": "cohost_removed",
-                                    "user_id": participant_id_str,
-                                    "username": self.username,
-                                    "message": f"{self.username} has been removed as a co-host."
-                                }
-                            )
-                        else:
-                            print(f"DEBUG: Cohost {participant_id_str} not found in cohosts.")
+                        # Notify all users
+                        await self.channel_layer.group_send(
+                            self.room_group_name,
+                            {
+                                "type": "cohost_removed",
+                                "participant_id": participant_id_str,
+                                "username": participant_username_str,
+                                "message": f"User {participant_username_str} is no longer a co-host."
+                            }
+                        )
                     else:
-                        print(f"DEBUG: Event {self.event_id} not found in active streams.")
-
+                        print(f"Participant {participant_id_str} not found in co-hosts.")
 
                 elif event_type == "stream_ended":
                     await self.end_stream()
+
+                elif event_type == "leave_room": 
+                    participant_id = data.get("participant_id")
+                    username = str(data.get("username"))
+
+                    # Ensure the event exists in active_streams
+                    if self.event_id in active_streams and participant_id in active_streams[self.event_id]["participants"]:
+                
+                        # Notify all users that the participant left
+                        await self.channel_layer.group_send(
+                            self.room_group_name,
+                            {
+                                "type": "participant_left",
+                                "participant_id": participant_id,
+                                "username": username,
+                                "message": f"{username} has left the live stream."
+                            }
+                        )
+                         
+                         # Remove participant from active streams
+                        del active_streams[self.event_id]["participants"][participant_id]
+
+                        # Broadcast updated participant list
+                        await self.broadcast_participant_list()
+
+                        # Broadcast updated participant count
+                        await self.broadcast_participant_count()
+
+                        # Remove participant from WebSocket group
+                        await self.channel_layer.group_discard(self.room_group_name, self.channel_name)
+                        await self.channel_layer.group_discard(f"user_{participant_id}", self.channel_name)
+
+                        # Close the WebSocket connection for the leaving participant
+                        await self.close()
 
                 elif event_type in [SWITCH_TO_VIDEO, SWITCH_TO_AUDIO, SWITCH_TO_SCREEN_SHARING]:
                     await self.switch_streaming_mode(event_type)
@@ -318,12 +344,21 @@ class StreamingConsumer(AsyncWebsocketConsumer):
                     # Assuming 16-bit PCM, little-endian, mono, 16kHz
                     pcm_data = np.frombuffer(bytes_data, dtype=np.int16)
 
-                    # Normalize the PCM data (Convert to float -1.0 to 1.0)
+                    # Normalize PCM data (-1.0 to 1.0 float range)
                     normalized_data = pcm_data.astype(np.float32) / 32768.0
 
-                    # Convert back to 16-bit PCM if needed
-                    processed_bytes = (normalized_data * 32768).astype(np.int16).tobytes()
+                    # Store the latest audio chunk for this participant
+                    active_audio_streams[self.participant_id] = normalized_data
 
+                    # Mix all active audio streams
+                    if len(active_audio_streams) > 1:
+                        mixed_audio = sum(active_audio_streams.values()) / len(active_audio_streams)
+                        mixed_audio = np.clip(mixed_audio, -1.0, 1.0)  # Prevent clipping
+                    else:
+                        mixed_audio = normalized_data  # Single speaker
+
+                    # Convert back to 16-bit PCM
+                    processed_bytes = (mixed_audio * 32768).astype(np.int16).tobytes()
                     event_type = "audio_chunk"
 
                 elif mode == SWITCH_TO_VIDEO:
@@ -476,7 +511,6 @@ class StreamingConsumer(AsyncWebsocketConsumer):
             "type": "participant_left",
             "message": f"{event['username']} left the stream.",
             "username": event["username"],
-            "user_id": event["user_id"]
         }))
 
     async def participant_count(self, event):
@@ -611,15 +645,33 @@ class StreamingConsumer(AsyncWebsocketConsumer):
         """Notify all users when a participant becomes a co-host."""
         await self.send(text_data=json.dumps({
             "type": "cohost_joined",
+            "username": event["username"],
             "participant_id": event["participant_id"],
+            "message": event["message"]
+        }))
+
+    async def cohost_removed(self, event):
+        """Notify all users when a co-host is removed."""
+        await self.send(text_data=json.dumps({
+            "type": "cohost_removed",
+            "participant_id": event["participant_id"],
+            "username": event["username"],
             "message": event["message"]
         }))
 
     async def cohost_left(self, event):
         """Send notification when a cohost leaves."""
-        print(f"DEBUG: Sending cohost_left event to WebSocket: {event}")  # Debugging
         await self.send(text_data=json.dumps({
             "type": "cohost_left",
+            "user_id": event["user_id"],
+            "username": event["username"],
+            "message": event["message"]
+        }))
+
+    async def participant_left_notification(self, event):
+        """Send notification when a participant leaves."""
+        await self.send(text_data=json.dumps({
+            "type": "participant_left",
             "user_id": event["user_id"],
             "username": event["username"],
             "message": event["message"]

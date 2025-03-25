@@ -5,6 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Live Streaming</title>
     <link href="./bootstrap.min.css" rel="stylesheet">
+    <link href="./jquery.jgrowl.min.css" rel="stylesheet">
+    <script src="./bootstrap.bundle.min.js"></script>
+    <script src="./jquery.min.js"></script>
+    <script src="./jquery.jgrowl.min.js"></script>
     <style>
         body {
             padding: 20px;
@@ -76,8 +80,10 @@
         let liveId;
         let cameraStream;
         let cameraVideo = document.getElementById("cameraPreview");
-       let isCoHostJoin = false;
-let coHostUserId = null;
+        let isCoHostJoin = false;
+        let coHostUserId = null;
+        let coHostUsername = null;
+        
         document.getElementById("start").addEventListener("click", async () => {
             socket = new WebSocket(`ws://127.0.0.1:8000/ws/stream/start/live/${userId}/`);
             socket.onopen = () => console.log("WebSocket connected!");
@@ -236,11 +242,11 @@ let coHostUserId = null;
             }
 
             if (data.type == "cohost_joined") {
-                 isCoHostJoin = true;
-                coHostUserId = data.user_id; 
+                isCoHostJoin = true;
+                coHostUserId = data.participant_id; 
+                coHostUsername =data.username;
 
-                if (participants[data.user_id]) {
-                    participants[data.user_id].is_cohost = true;
+                if (participants[data.participant_id]) {
                     updateParticipantList();
                 }
             }
@@ -253,36 +259,49 @@ let coHostUserId = null;
                     updateParticipantList();
                 }
             }
+
+            if (data.type == "cohost_removed") {
+                isCoHostJoin = false;
+                 // Ensure the removed co-host ID is cleared
+                if (data.participant_id === coHostUserId) {
+                    coHostUserId = null;
+                }
+                updateParticipantList();
+            }
+
+            if(data.type === "participant_left"){
+                updateParticipantList();
+                $.jGrowl(data.message, { life: 10000});
+            }
         }
 
         function updateParticipantList() {
-    const list = document.getElementById("participant-list");
-    list.innerHTML = "";
+            const list = document.getElementById("participant-list");
+            list.innerHTML = "";
 
-    Object.entries(participants).forEach(([id, participant]) => {
-        const li = document.createElement("li");
-        li.textContent = participant.username;
-        console.log(participant);
+            Object.entries(participants).forEach(([id, participant]) => {
+                const li = document.createElement("li");
+                li.textContent = participant.username;
+            
+                 if (id === coHostUserId) { // If user is the co-host
+                    const removeCohostButton = document.createElement("button");
+                    removeCohostButton.textContent = "Remove Co-host";
+                    removeCohostButton.style.marginLeft = "10px";
+                    removeCohostButton.onclick = () => removeCohost(id);
+                    li.appendChild(removeCohostButton);
+                } else {
+                    const inviteButton = document.createElement("button");
+                    inviteButton.textContent = "Invite";
+                    inviteButton.style.marginLeft = "10px";
+                    inviteButton.onclick = () => sendInvite(id);
+                    li.appendChild(inviteButton);
+                }
 
-        if (id === coHostUserId) {  // Check if the participant is the co-host
-            const removeCohostButton = document.createElement("button");
-            removeCohostButton.textContent = "Remove Co-host";
-            removeCohostButton.style.marginLeft = "10px";
-            removeCohostButton.onclick = () => removeCohost(id);
-            li.appendChild(removeCohostButton);
-        } else {
-            const inviteButton = document.createElement("button");
-            inviteButton.textContent = "Invite";
-            inviteButton.style.marginLeft = "10px";
-            inviteButton.onclick = () => sendInvite(id);
-            li.appendChild(inviteButton);
+                list.appendChild(li);
+            });
+
+            document.getElementById("participants-count").innerText = `Participants: ${Object.keys(participants).length}`;
         }
-
-        list.appendChild(li);
-    });
-
-    document.getElementById("participants-count").innerText = `Participants: ${Object.keys(participants).length}`;
-}
 
         function sendInvite(userId) {
             if (socket) {
@@ -342,12 +361,11 @@ let coHostUserId = null;
         
         function removeCohost(userId) {
             if (socket) {
-                socket.send(JSON.stringify({ type: "remove_cohost", user_id: userId }));
-                console.log(`Removed co-host: ${userId}`);
+                socket.send(JSON.stringify({ type: "remove_cohost", username: coHostUsername, participant_id: userId }));
             }
         }
 
     </script>
-    <script src="./bootstrap.bundle.min.js"></script>
+   
 </body>
 </html>

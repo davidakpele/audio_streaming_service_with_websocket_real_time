@@ -41,7 +41,11 @@
         <br/>
         <h2 class="text-primary">Live Streaming</h2>
         <input type="text" id="wsUrl" class="form-control" placeholder="Enter WebSocket Event Link">
-        <button id="connect" class="btn btn-success mt-2">Join Event</button>
+        <div class="d-flex gap-3">
+ <button id="connect" class="btn btn-success mt-2">Join Event</button>
+        <button id="leave" class="btn btn-secondary mt-2 btn-xs d-none">Leave Live</button>
+        </div>
+       
         <button type="button" class="btn btn-warning d-none btn-xs" id="leaveCohost" >Leave as Co-host</button>
         
         <h3>Participants</h3>
@@ -79,31 +83,45 @@
         let socket;
         let mediaSource = null;
         let sourceBuffer = null;
-       
+        let mediaRecorder;
+        let currentStream;
         let screenVideo = document.getElementById("screen-video"); 
         let mediaQueue = []; 
         const messagesDiv = document.getElementById("messages");
+        const acceptBtn = document.getElementById("acceptCohost");
+        const declineBtn = document.getElementById("declineCohost");
+        const leaveBtn = document.getElementById("leaveCohost");
         const list = document.getElementById("participant-list");
+        let leaveButton = document.getElementById("leave");
         let audioContext = new (window.AudioContext || window.webkitAudioContext)();
         let audioQueue = [];
-        let participant_user_id = '';
+        let participant_user_id = ''; 
+        let username = '';
         
         function getUserIdFromWsUrl(wsUrl) {
             const urlParts = wsUrl.split("/");
-            return urlParts[10]; // Get last part
+            var data = ([urlParts[10], urlParts[9]]);
+            
+            return data; 
         }
 
         document.getElementById("connect").addEventListener("click", () => {
             const wsUrl = document.getElementById("wsUrl").value;
-            const userId = getUserIdFromWsUrl(wsUrl);
-            participant_user_id = userId;
+            const userDetails = getUserIdFromWsUrl(wsUrl);
+            participant_user_id = userDetails[0];
+            username = userDetails[1];
+
             if (!wsUrl) {
-                alert("Please enter a WebSocket URL");
+                $.jGrowl("Please enter a WebSocket URL", { life: 10000});
                 return;
             }
-            
+
             socket = new WebSocket(wsUrl);
-            socket.onopen = () => console.log("Connected to WebSocket");
+
+            socket.onopen = () => {
+                $.jGrowl("Connected to WebSocket", { life: 10000});
+                showLeaveButton();
+            };
 
             socket.onmessage = async (event) => {
                 if (typeof event.data === "string") {
@@ -114,13 +132,47 @@
                         console.error("Error parsing WebSocket message:", error);
                     }
                 } else if (event.data instanceof Blob) {
-                    playRawAudio(event.data); 
+                    playRawAudio(event.data);
                 } else if (event.data instanceof ArrayBuffer) {
-                  
                     playRawAudio(new Blob([event.data]));
                 }
             };
+
+            socket.onclose = () => {
+                $.jGrowl("Disconnected from WebSocket", { life: 10000});
+                hideLeaveButton(); 
+            };
+
+            socket.onerror = (error) => {
+                $.jGrowl("WebSocket error. Please try again", { life: 10000});
+            };
         });
+
+        // Function to show the "Leave Live" button
+        function showLeaveButton() {
+            leaveButton.addEventListener("click", leaveLiveStream);
+            leaveButton.classList.remove("d-none");
+        }
+
+        // Function to hide the "Leave Live" button
+        function hideLeaveButton() {
+            leaveButton.classList.add("d-none");
+        }
+
+        // Function to handle leaving the live stream
+        function leaveLiveStream() {
+            sendWebSocketMessage({
+                type: "leave_room",
+                participant_id: participant_user_id,
+                "username":username,
+            });
+
+            if (socket) {
+                socket.close();
+            }
+            hideLeaveButton();
+            $.jGrowl("You have left the live stream.", { life: 10000});
+        }
 
         screenVideo.style.display = "none";
 
@@ -178,8 +230,18 @@
             if(data.type ==="cohost_joined"){
                 $.jGrowl(data.message, { life: 10000});
             }
-    
             
+            if (data.type === "cohost_removed") {
+                // Reset button states
+                disableMicrophone();
+                leaveBtn.classList.add("d-none");
+                $.jGrowl(data.message, { life: 10000});
+            }
+            
+            if(data.type === "participant_left"){
+                updateParticipantList();
+                $.jGrowl(data.message, { life: 10000});
+            }
         }
 
         function playAudio(audioBlob) {
@@ -255,8 +317,6 @@
         // ** Switch to Screen Sharing Mode **
         function switchToScreenSharingMode() {
             screenVideo.style.display = "block";
-            console.log("Switching to Screen Sharing...");
-
             if (audioContext) {
                 audioContext.close();
                 audioContext = null;
@@ -323,10 +383,6 @@
             const modal = new bootstrap.Modal(document.getElementById("cohostInviteModal"));
             modal.show();
 
-            const acceptBtn = document.getElementById("acceptCohost");
-            const declineBtn = document.getElementById("declineCohost");
-            const leaveBtn = document.getElementById("leaveCohost");
-
              // Reset button states
             leaveBtn.classList.add("d-none");
 
@@ -365,27 +421,34 @@
         }
 
         // Enable Microphone
-        function enableMicrophone() {
-            navigator.mediaDevices.getUserMedia({ audio: true })
-                .then(function (stream) {
-                    const audioTrack = stream.getAudioTracks()[0];
-                    console.log("Microphone enabled for cohost.");
-                })
-                .catch(function (error) {
-                    console.error("Error enabling microphone:", error);
-                });
+        async function enableMicrophone() {
+            disableMicrophone();
+            currentStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const audioContext = new AudioContext();
+            const mediaStreamSource = audioContext.createMediaStreamSource(currentStream);
+            const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+            processor.onaudioprocess = (event) => {
+                const inputData = event.inputBuffer.getChannelData(0);
+                const int16Array = new Int16Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) {
+                    int16Array[i] = inputData[i] * 32767; // Convert float [-1,1] to Int16
+                }
+                socket.send(int16Array.buffer); // Send raw PCM data
+            };
+
+            mediaStreamSource.connect(processor);
+            processor.connect(audioContext.destination);
         }
 
        // Disable Microphone (When user leaves as a cohost)
         function disableMicrophone() {
-            navigator.mediaDevices.getUserMedia({ audio: true })
-                .then(function (stream) {
-                    stream.getTracks().forEach(track => track.stop()); // Stop the audio
-                    console.log("Microphone disabled, user is now a listener.");
-                })
-                .catch(function (error) {
-                    console.error("Error disabling microphone:", error);
-                });
+            if (mediaRecorder) {
+                mediaRecorder.stop();
+            }
+            if (currentStream) {
+                currentStream.getTracks().forEach(track => track.stop());
+            }
         }
 
         function sendWebSocketMessage(message) {
