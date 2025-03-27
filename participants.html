@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Streaming</title>
+    <link href="./bootstrap.min.css" rel="stylesheet">
+    <link href="./jquery.jgrowl.min.css" rel="stylesheet">
+    <script src="./bootstrap.bundle.min.js"></script>
+    <script src="./jquery.min.js"></script>
+    <script src="./jquery.jgrowl.min.js"></script>
+    <style>
+        body {
+            padding: 20px;
+            background-color: #f8f9fa;
+        }
+        #messages {
+            border: 1px solid #ccc;
+            height: 200px;
+            overflow-y: auto;
+            padding: 10px;
+            background: #fff;
+        }
+        .participant-list {
+            list-style: none;
+            padding: 0;
+        }
+        .participant-list li {
+            padding: 10px;
+            background: #007bff;
+            color: white;
+            border-radius: 5px;
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h3>Live Video Stream</h3>
+        <video id="screenShareVideo" autoplay playsinline style="width:60%; border: 1px solid #000;"></video>
+        <br/>
+        <h2 class="text-primary">Live Streaming</h2>
+        <input type="text" id="wsUrl" class="form-control" placeholder="Enter WebSocket Event Link">
+        <div class="d-flex gap-3">
+            <button id="connect" class="btn btn-success mt-2">Join Event</button>
+            <button id="leave" class="btn btn-secondary mt-2 btn-xs d-none">Leave Live</button>
+        </div>
+       
+        <button type="button" class="btn btn-warning d-none btn-xs" id="leaveCohost" >Leave as Co-host</button>
+        <h3>Participants</h3>
+        <p id="participants-count" class="fw-bold">Participants: 0</p>
+        <ul id="participant-list" class="participant-list"></ul>
+
+        <h3>Chat</h3>
+        <div id="chat-container">
+            <div id="messages"></div>
+            <input type="text" id="messageInput" class="form-control mt-2" placeholder="Type a message...">
+            <button onclick="sendMessage()" class="btn btn-primary mt-2">Send</button>
+        </div>
+    </div>
+    
+    <!-- Cohost Invite Modal -->
+    <div class="modal fade" id="cohostInviteModal" tabindex="-1" aria-labelledby="cohostInviteLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="cohostInviteLabel">Cohost Invitation</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p id="cohostInviteMessage"></p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-danger" id="declineCohost">Decline</button>
+                    <button type="button" class="btn btn-success" id="acceptCohost">Accept</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let socket;
+        const mediaSource = new MediaSource();
+        let sourceBuffer = null;
+        let mediaRecorder;
+        let currentStream;
+        let screenVideo = document.getElementById("screenShareVideo"); 
+        let mediaQueue = []; 
+        const messagesDiv = document.getElementById("messages");
+        const acceptBtn = document.getElementById("acceptCohost");
+        const declineBtn = document.getElementById("declineCohost");
+        const leaveBtn = document.getElementById("leaveCohost");
+        const list = document.getElementById("participant-list");
+        let leaveButton = document.getElementById("leave");
+        let audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        let audioQueue = [];
+        let participant_user_id = ''; 
+        let username = '';
+        let lastEventType = null;
+        
+        // Set up MediaSource for screen sharing
+        mediaSource.addEventListener('sourceopen', () => {
+            sourceBuffer = mediaSource.addSourceBuffer('video/webm; codecs=vp9');
+        });
+
+        screenVideo.src = URL.createObjectURL(mediaSource);
+
+        function getUserIdFromWsUrl(wsUrl) {
+            const urlParts = wsUrl.split("/");
+            var data = ([urlParts[10], urlParts[9]]);
+            
+            return data; 
+        }
+
+        document.getElementById("connect").addEventListener("click", () => {
+            const wsUrl = document.getElementById("wsUrl").value;
+            const userDetails = getUserIdFromWsUrl(wsUrl);
+            participant_user_id = userDetails[0];
+            username = userDetails[1];
+
+            if (!wsUrl) {
+                $.jGrowl("Please enter a WebSocket URL", { life: 10000});
+                return;
+            }
+
+            socket = new WebSocket(wsUrl);
+
+            socket.onopen = () => {
+                showLeaveButton();
+            };
+
+            socket.onmessage = async (event) => {
+                if (typeof event.data === "string") {
+                    try {
+                        const data = JSON.parse(event.data);
+                        handleEventData(data);
+                    } catch (error) {
+                        $.jGrowl("Error parsing WebSocket message:", error, { life: 10000});
+                    }
+                } 
+                
+                else if (event.data instanceof Blob) {
+                    playRawAudio(event.data);
+                } else if (event.data instanceof ArrayBuffer) {
+                    playRawAudio(new Blob([event.data]));
+                }
+            };
+
+            socket.onclose = () => {
+                hideLeaveButton(); 
+            };
+
+            socket.onerror = (error) => {
+                $.jGrowl("WebSocket error. Please try again", { life: 10000});
+            };
+        });
+
+        // Function to show the "Leave Live" button
+        function showLeaveButton() {
+            leaveButton.addEventListener("click", leaveLiveStream);
+            leaveButton.classList.remove("d-none");
+        }
+
+        // Function to hide the "Leave Live" button
+        function hideLeaveButton() {
+            leaveButton.classList.add("d-none");
+        }
+
+        // Function to handle leaving the live stream
+        function leaveLiveStream() {
+            sendWebSocketMessage({
+                type: "leave_room",
+                participant_id: participant_user_id,
+                "username":username,
+            });
+
+            if (socket) {
+                socket.close();
+            }
+            hideLeaveButton();
+            $.jGrowl("You have left the live stream.", { life: 10000});
+            $.jGrowl("Disconnected from WebSocket", { life: 20000})
+        }
+
+        screenVideo.style.display = "none";
+
+        function handleEventData(data) {
+            if (data.type === "participant_list") {
+                list.innerHTML = "";
+                data.participants.forEach(participant => {
+                    const li = document.createElement("li");
+                    li.textContent = participant.username;
+                    list.appendChild(li);
+                });
+                document.getElementById("participants-count").innerText = `Participants: ${data.participants.length}`;
+            }
+
+            if (data.type === "message_broadcast") {
+                messagesDiv.innerHTML += `<p><strong>${data.username}:</strong> ${data.message}</p>`;
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            }
+
+            if (data.type === "stream_ended") {
+                screenVideo.style.display = "none";
+                messagesDiv.innerHTML = ""; 
+                list.innerHTML = "";
+                $.jGrowl(data.message, { life: 10000});
+                if (audioContext) audioContext.close(); // Stop audio context
+            }
+
+            if (data.mode === "switching_to_audio") {
+                switchToAudioMode();
+            } else if (data.mode === "switching_to_screen_sharing") {
+                switchToScreenSharingMode();
+            }
+            
+            if (data.type === "chat_history") {
+                if (Array.isArray(data.messages)) {
+                    data.messages.forEach((message) => {
+                        if (message.type === "chat_message") {
+                            // Process chat_message type here
+                            messagesDiv.innerHTML += `<p><strong>${message.username}:</strong> ${message.message}</p>`;
+                            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                        }
+                    });
+                }
+            }
+
+            // Handle cohost invite
+            if (data.type === "cohost_invite") {
+                showCohostInviteModal(data.message);
+            }
+
+            if (data.type === "cohost_left") {
+                $.jGrowl(data.message, { life: 10000});
+            }
+
+            if(data.type ==="cohost_joined"){
+                $.jGrowl(data.message, { life: 10000});
+            }
+            
+            if (data.type === "cohost_removed") {
+                // Reset button states
+                disableMicrophone();
+                leaveBtn.classList.add("d-none");
+                $.jGrowl(data.message, { life: 10000});
+            }
+            
+            if(data.type === "participant_left"){
+                updateParticipantList();
+                $.jGrowl(data.message, { life: 10000});
+            }
+
+            if(data.type === "error"){
+                $.jGrowl(data.details, { life: 10000});
+            }
+        }
+
+        // ** Switch to Audio Mode **
+        function switchToAudioMode() {
+            screenVideo.style.display = "none";
+            console.log("Switching to Audio Stream...");
+
+            if (mediaSource) {
+                mediaSource.endOfStream();
+                mediaSource = null;
+                sourceBuffer = null;
+                mediaQueue = [];
+            }
+        }
+
+        // ** Switch to Screen Sharing Mode **
+        function switchToScreenSharingMode() {
+            screenVideo.style.display = "block";
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+        }
+
+        function sendMessage() {
+            const message = document.getElementById("messageInput").value;
+            if (message && socket) {
+                socket.send(JSON.stringify({ type: "broadcast_message", message }));
+                document.getElementById("messageInput").value = "";
+            }
+        }
+
+        async function playRawAudio(audioBlob) {
+            try {
+                const arrayBuffer = await audioBlob.arrayBuffer();
+                const view = new DataView(arrayBuffer);
+
+                // 🔹 Set audio format (modify based on WebSocket server settings)
+                const sampleRate = 48000; // Try 16000, 32000, 44100, or check WebSocket server settings
+                const numChannels = 1; // Change to 2 for stereo
+                const bytesPerSample = 2; // 16-bit PCM
+
+                const numSamples = arrayBuffer.byteLength / bytesPerSample / numChannels;
+                const audioBuffer = audioContext.createBuffer(numChannels, numSamples, sampleRate);
+
+                // Convert PCM to Float32Array
+                for (let channel = 0; channel < numChannels; channel++) {
+                    const channelData = audioBuffer.getChannelData(channel);
+                    for (let i = 0; i < numSamples; i++) {
+                        const sampleIndex = i * numChannels + channel;
+                        const sample = view.getInt16(sampleIndex * bytesPerSample, true);
+                        channelData[i] = sample / 32768.0; // Normalize to [-1, 1]
+                    }
+                }
+
+                // Queue audio to avoid gaps
+                audioQueue.push(audioBuffer);
+                if (audioQueue.length === 1) {
+                    playNextBuffer();
+                }
+
+            } catch (error) {
+                console.error("Error processing raw audio:", error);
+            }
+        }
+       
+        // Play next buffer in the queue
+        function playNextBuffer() {
+            if (audioQueue.length === 0) return;
+
+            const source = audioContext.createBufferSource();
+            source.buffer = audioQueue.shift();
+            source.connect(audioContext.destination);
+
+            source.onended = playNextBuffer; // Play next buffer after current one finishes
+            source.start();
+        }
+
+        function showCohostInviteModal(message) {
+            $.jGrowl(message, { life: 10000});
+            document.getElementById("cohostInviteMessage").innerText = message;
+            const modal = new bootstrap.Modal(document.getElementById("cohostInviteModal"));
+            modal.show();
+
+             // Reset button states
+            leaveBtn.classList.add("d-none");
+
+           // Handle Accept
+            acceptBtn.onclick = function () {
+                enableMicrophone();
+                sendWebSocketMessage({
+                    type: "accept_cohost"
+                });
+
+                // Show "Leave as Co-host" button
+                leaveBtn.classList.remove("d-none");
+
+                modal.hide();
+            };
+
+            // Handle Decline
+            declineBtn.onclick = function () {
+                sendWebSocketMessage({
+                    type: "cohost_reject"
+                });
+                modal.hide();
+            };
+
+            // Handle Leaving as Co-host
+            leaveBtn.onclick = function () {
+                disableMicrophone();
+                sendWebSocketMessage({
+                    type: "cohost_leave",
+                    participant_id: participant_user_id
+                });
+               
+                // Hide the leave button
+                leaveBtn.classList.add("d-none");
+            };
+        }
+
+        // Enable Microphone
+        async function enableMicrophone() {
+            disableMicrophone();
+            currentStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const audioContext = new AudioContext();
+            const mediaStreamSource = audioContext.createMediaStreamSource(currentStream);
+            const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+            processor.onaudioprocess = (event) => {
+                const inputData = event.inputBuffer.getChannelData(0);
+                const int16Array = new Int16Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) {
+                    int16Array[i] = inputData[i] * 32767; // Convert float [-1,1] to Int16
+                }
+                socket.send(int16Array.buffer); // Send raw PCM data
+            };
+
+            mediaStreamSource.connect(processor);
+            processor.connect(audioContext.destination);
+        }
+
+       // Disable Microphone (When user leaves as a cohost)
+        function disableMicrophone() {
+            if (mediaRecorder) {
+                mediaRecorder.stop();
+            }
+            if (currentStream) {
+                currentStream.getTracks().forEach(track => track.stop());
+            }
+        }
+
+        function sendWebSocketMessage(message) {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify(message));
+            }
+        }
+
+    </script>
+    
+</body>
+</html>
