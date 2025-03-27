@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Active Live Streams</title>
+</head>
+<body>
+    <h2>Active Live Streams</h2>
+    <button onclick="fetchActiveStreams()">Fetch Active Streams</button>
+    <ul id="streams-list"></ul>
+
+    <script>
+        let socket = null;
+
+        function fetchActiveStreams() {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ action: "get_active_streams" }));
+                return;
+            }
+
+            // Initialize WebSocket connection
+            socket = new WebSocket("ws://127.0.0.1:8000/ws/active-streams/");
+
+            socket.onopen = function () {
+                socket.send(JSON.stringify({ type: "get_active_streams" }));
+            };
+
+            socket.onmessage = function (event) {
+                const data = JSON.parse(event.data);
+                console.log("Active Streams:", data.active_streams);
+                updateStreamList(data.active_streams);
+            };
+
+            socket.onclose = function () {
+                console.log("WebSocket Disconnected");
+            };
+
+            socket.onerror = function (error) {
+                console.error("WebSocket Error:", error);
+            };
+        }
+
+        function updateStreamList(streams) {
+            const list = document.getElementById("streams-list");
+            list.innerHTML = ""; // Clear previous list
+            if (streams.length === 0) {
+                list.innerHTML = "<li>No active streams available</li>";
+            } else {
+                streams.forEach(stream => {
+                    const li = document.createElement("li");
+                    li.textContent = stream;
+                    list.appendChild(li);
+                });
+            }
+        }
+    </script>
+</body>
+</html>

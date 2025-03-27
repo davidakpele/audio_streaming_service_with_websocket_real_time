@@ -83,7 +83,7 @@
         let isCoHostJoin = false;
         let coHostUserId = null;
         let coHostUsername = null;
-        let token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlcyI6WyJVU0VSIl0sInVzZXJfaWQiOjEsImV4cCI6MTc0MzA1NzQ4MiwiaWF0IjoxNzQyOTcxMDgyfQ.lmp2hLnaTWplcs3Bontnfy4SNXV16thLfxhUdZ1pnL8"; 
+        let token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlcyI6WyJVU0VSIl0sInVzZXJfaWQiOjEsImV4cCI6MTc0MzE3MTQwMSwiaWF0IjoxNzQzMDg1MDAxfQ.cXp4VY3UOom8FsMED6Nn0yBqn4gLvDlpiKMpFawi9zE"; 
 
         document.getElementById("start").addEventListener("click", async () => {
             socket = new WebSocket(`ws://127.0.0.1:8000/ws/stream/start/live/${userId}/?token=${encodeURIComponent(token)}`);

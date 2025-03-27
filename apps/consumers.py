@@ -1,17 +1,18 @@
 import json
 import uuid
-import numpy as np
-import redis
-from datetime import datetime
-from channels.generic.websocket import AsyncWebsocketConsumer
-from channels.db import database_sync_to_async
-from django.utils.timezone import now
-from .models import Participant, Room, StreamType
 import logging
-import jwt
 import aiohttp
+import redis
+import jwt
+import numpy as np
+from datetime import datetime
 from django.conf import settings
+from django.utils.timezone import now
+from asgiref.sync import sync_to_async
+from channels.db import database_sync_to_async
+from .models import Participant, Room, StreamType
 from django.core.exceptions import ObjectDoesNotExist
+from channels.generic.websocket import AsyncWebsocketConsumer
 
 # Redis connection
 redis_client = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=True)
@@ -26,12 +27,24 @@ logger = logging.getLogger(__name__)
 class StreamingConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         """Handle both stream start and join based on URL."""
-        self.scope_params = self.scope["url_route"]["kwargs"]
+        global active_streams
+        self.scope_params = self.scope.get("url_route", {}).get("kwargs", {})
         self.user_id = self.scope_params.get("user_id", None)  
         self.event_id = self.scope_params.get("event_id", None)  
         self.participant_id = self.scope_params.get("participantId", None) 
         self.username = self.scope_params.get("username", "Guest")
         
+        # Check if this is an "active-streams" request
+        if self.scope["path"] == "/ws/active-streams/":
+            await self.accept()
+            # Fetch active streams using the method
+            active_streams = await self.get_active_streams()
+
+            await self.send(json.dumps({
+                "type": "active_streams",
+                "streams": active_streams  # Send the list of active room names
+            }))
+            return
         # Extract token from query params
         jwt_token = self.scope["query_string"].decode().split("token=")[-1] if b"token=" in self.scope["query_string"] else None
 
@@ -283,8 +296,14 @@ class StreamingConsumer(AsyncWebsocketConsumer):
 
                 elif event_type == "invite_cohost":
                     if str(self.user_id) != active_streams[self.event_id]["host"]:
-                        print(f"Unauthorized cohost invite attempt by {self.user_id}")  # Debug log
-                        return  
+                        await self.accept()
+                        await self.send(text_data=json.dumps({
+                            "type": "error",
+                            "message": "Unauthorized User",
+                            "details": f"Unauthorized cohost invite attempt by {self.user_id}"
+                        }))
+                        await self.close()
+                        return 
                     
                     # Ensure correct key and type
                     participant_id = str(data.get("user_id"))
@@ -305,8 +324,14 @@ class StreamingConsumer(AsyncWebsocketConsumer):
 
                     # Prevent duplicate co-hosts
                     if any(value["participant_id"] == self.participant_id for value in cohosts.values()):
-                        print(f"User {self.participant_id} is already a co-host!")
-                        return
+                        await self.accept()
+                        await self.send(text_data=json.dumps({
+                            "type": "error",
+                            "message": "Duplicate Cohost",
+                            "details": f"User {self.participant_id} is already a co-host!"
+                        }))
+                        await self.close()
+                        return 
 
                     # Ensure the participant exists before making them a co-host
                     if self.participant_id in active_streams[self.event_id]["participants"]:
@@ -522,7 +547,7 @@ class StreamingConsumer(AsyncWebsocketConsumer):
 
     async def binary_data_received(self, event):
         """Send binary data (audio/video) to clients with correct event type."""
-        await self.send(text_data=json.dumps({"event_type": event["event_type"]}))# Send metadata first
+        # await self.send(text_data=json.dumps({"event_type": event["event_type"]}))# Send metadata first
         await self.send(bytes_data=event["bytes_data"])  # Then send the binary data
 
     async def switch_streaming_mode(self, mode):
@@ -831,11 +856,35 @@ class StreamingConsumer(AsyncWebsocketConsumer):
         """Notify participants that the stream has ended."""
         await self.send(text_data=json.dumps({"type": "stream_ended", "message": event["message"]}))
         await self.close()
-            
+
+    async def get_active_streams(self):
+        # Wrap ORM calls inside `sync_to_async(thread_sensitive=False)`
+        exists = await sync_to_async(Room.objects.filter(status="active").exists, thread_sensitive=False)()
+        if not exists:
+            return []
+
+        # Fetch active streams as dictionaries
+        active_streams = await sync_to_async(
+            lambda: list(Room.objects.filter(status="active").values(
+                "room_id", "created_at", "total_participants", 
+                "status", "start_timestamp", "type"
+            )), 
+            thread_sensitive=False
+        )()
+
+        # Convert datetime fields to strings
+        for stream in active_streams:
+            if isinstance(stream["created_at"], datetime):
+                stream["created_at"] = stream["created_at"].isoformat()
+            if isinstance(stream["start_timestamp"], datetime):
+                stream["start_timestamp"] = stream["start_timestamp"].isoformat()
+
+        return active_streams
+
     @database_sync_to_async
     def room_exists(self):
         return Room.objects.filter(room_id=self.event_id).exists()
-
+    
     @database_sync_to_async
     def get_room(self):
         return Room.objects.get(room_id=self.event_id)
