@@ -54,6 +54,10 @@ class UploadRecordingAPIView(APIView):
         music_file = request.FILES.get("music")
         if not music_file:
             return Response({"error": "Music file is required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        allowed_formats = ["audio/mpeg", "audio/webm", "audio/wav"]
+        if music_file.content_type not in allowed_formats:
+            return Response({"error": "Invalid audio format. Allowed: MP3, WEBM, WAV"}, status=status.HTTP_400_BAD_REQUEST)
 
         if not self.is_valid_music(music_file):
             return Response({"error": "Invalid music file format. Allowed: MP3, MP4"}, status=status.HTTP_400_BAD_REQUEST)
@@ -133,6 +137,26 @@ class UploadRecordingAPIView(APIView):
         except UploadAudioRecord.DoesNotExist:
             return Response({"error": "Recording not found"}, status=status.HTTP_404_NOT_FOUND)
 
+    # Fetch records by visibility type 
+    def get(self, request, pk=None):
+        visibility = request.query_params.get("visibility", None)
+
+        if pk:
+            recording = get_object_or_404(UploadAudioRecord, id=pk)
+            return Response(self.format_recording(recording, request), status=status.HTTP_200_OK)
+
+        recordings = UploadAudioRecord.objects.all()
+
+        # Filter by visibility if provided
+        if visibility:
+            if visibility not in ["Public", "Private"]:
+                return Response({"error": "Invalid visibility filter. Allowed values: Public, Private"},
+                                status=status.HTTP_400_BAD_REQUEST)
+            recordings = recordings.filter(visibility=visibility)
+
+        formatted_recordings = [self.format_recording(recording, request) for recording in recordings]
+        return Response(formatted_recordings, status=status.HTTP_200_OK)
+
     def is_valid_music(self, file):
         allowed_types = ['audio/mpeg', 'audio/mp3', 'video/mp4']
         return hasattr(file, 'content_type') and file.content_type in allowed_types
@@ -142,6 +166,19 @@ class UploadRecordingAPIView(APIView):
         return hasattr(file, 'content_type') and file.content_type in allowed_types
 
 class RecordedAudioStreamView(APIView):
+    def get(self, request, audio_id=None):
+        if audio_id:
+            # Get single audio by ID
+            try:
+                recorded_audio = RecordedAudioStream.objects.get(id=audio_id)
+                return Response(RecordedAudioStreamSerializer(recorded_audio).data, status=status.HTTP_200_OK)
+            except RecordedAudioStream.DoesNotExist:
+                return Response({"error": "Audio not found"}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            # Get all recorded audio
+            all_audio = RecordedAudioStream.objects.all()
+            return Response(RecordedAudioStreamSerializer(all_audio, many=True).data, status=status.HTTP_200_OK)
+
     def post(self, request):
         user_id = request.data.get("userId")
         if not user_id:
@@ -181,6 +218,55 @@ class RecordedAudioStreamView(APIView):
             status=status.HTTP_201_CREATED,
         )
 
+    def put(self, request, audio_id):
+        try:
+            recorded_audio = RecordedAudioStream.objects.get(id=audio_id)
+        except RecordedAudioStream.DoesNotExist:
+            return Response({"error": "Audio not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        user_id = request.data.get("userId")
+        new_audio_file = request.FILES.get("recorded_audio_stream")
+
+        if user_id:
+            recorded_audio.userId = user_id  # Update user ID if provided
+
+        if new_audio_file:
+            # Validate file type
+            allowed_formats = ["audio/mpeg", "audio/webm", "audio/wav"]
+            if new_audio_file.content_type not in allowed_formats:
+                return Response({"error": "Invalid audio format. Allowed: MP3, WEBM, WAV"}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Delete old audio file
+            if recorded_audio.stream_audio_file:
+                old_file_path = recorded_audio.stream_audio_file.replace(settings.MEDIA_URL, "")
+                default_storage.delete(old_file_path)
+
+            # Save new file
+            protocol = "https" if request.is_secure() else "http"
+            domain = request.get_host()
+            base_url = f"{protocol}://{domain}{settings.MEDIA_URL}"
+
+            audio_filename = default_storage.save(
+                f"stream/audio/{new_audio_file.name}", ContentFile(new_audio_file.read()))
+            recorded_audio.stream_audio_file = f"{base_url}{audio_filename}"
+
+        recorded_audio.save()
+
+        return Response(
+            {
+                "message": "Recorded audio updated successfully",
+                "data": RecordedAudioStreamSerializer(recorded_audio).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def delete(self, request, audio_id):
+        try:
+            recorded_audio = RecordedAudioStream.objects.get(id=audio_id)
+            recorded_audio.delete()
+            return Response({"message": "Audio deleted successfully"}, status=status.HTTP_200_OK)
+        except RecordedAudioStream.DoesNotExist:
+            return Response({"error": "Audio not found"}, status=status.HTTP_404_NOT_FOUND)
 
 class ScheduleEvent(APIView):
     def post(self, request):
