@@ -36,3 +36,40 @@
 | `Participants Display` | `Both can see all participants list *Users who join the event*` | `The list constantly update through webscoket`[ Handle is **participant_list**] |
 | `Notification Display` | Both get notification when user join, or when user accept to be co-host or leave as coHost or even exit the event | [ Handles are  **broadcast_message, message_broadcast, cohost_joined cohost_left, cohost_removed, participant_left**]  |
 
+
+
+
+
+## SCHEDULE EVENT ENDPOINTS
+| Endpoint | Description | Method | payloads | 
+|----------|--------|----------|--------|
+| `api/v1/events/` | Create Schedule event | `POST`| `{event_title:'', 'startTime':'', 'startYear':'', 'endTime':'', 'endYear':'', 'category':'', 'theme':'theme':'this is image'}` |
+| `api/v1/events/:id/` | Update Schedule event | `PUT`| `{event_title:'', 'startTime':'', 'startYear':'', 'endTime':'', 'endYear':'', 'category':'', 'theme':'theme':'this is image'}` |
+| `api/v1/events/:id/` | Get Specific Scheduled event record | `GET`| NULL |
+| `api/v1/events/` | Get All Scheduled event records | `GET`| NULL |
+| `api/v1/events/:id/` | Delete Specific Scheduled event record | `DELETE`| NULL |
+
+
+
+## RECORD UPLOAD ENDPOINTS
+| Endpoint | Description | Method | payloads | 
+|----------|--------|----------|--------|
+| `api/v1/recordings/` | Create record upload | `POST`| `{record_title:'', 'description':'', 'visibility':'', 'userId':'', 'theme':'this is image', 'music':'This is music mp4/mp3'}` **Allowed: MP3, WEBM, WAV**|
+| `api/v1/recordings/:id/` | Update record details | `PUT`| `{record_title:'', 'description':'', 'visibility':'', 'userId':'', 'theme':'this is image', 'music':'This is music mp4/mp3'}` **Allowed: MP3, WEBM, WAV**|
+| `api/v1/recordings/:id/` | Get Specific record | `GET`| NULL |
+| `api/v1/events/` | Get All records | `GET`| NULL |
+| `api/v1/events/:id/` | Delete Specific record | `DELETE`| NULL |
+| `/api/recordings/?visibility=Public` | Filtering record by Public or Private | `GET`| NULL |
+
+
+## UPLOAD RECORDED AUDIO STREAM ENDPOINTS
+| Endpoint | Description | Method | payloads | 
+|----------|--------|----------|--------|
+| `api/v1/upload-audio-stream/` | Create upload ON recorded audio during live stream | `POST`| `{userId:'',  'recorded_audio_stream':'This is music mp4/mp3'}` **Allowed: MP3, WEBM, WAV**|
+| `api/v1/upload-audio-stream/:id/` | Update record details | `PUT`| `{'userId':'', 'recorded_audio_stream':'This is music mp4/mp3'}` **Allowed: MP3, WEBM, WAV**|
+| `api/v1/upload-audio-stream/:id/` | Get Specific record | `GET`| NULL |
+| `api/v1/upload-audio-stream/` | Get All records | `GET`| NULL |
+| `api/v1/upload-audio-stream/:id/` | Delete Specific record | `DELETE`| NULL |
+
+
+
