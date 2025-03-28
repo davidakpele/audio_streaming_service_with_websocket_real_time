@@ -78,6 +78,8 @@
         let participants = {};
         let userId = "1";
         let liveId;
+        let audioContext = null;
+        let processor = null;
         let cameraStream;
         let cameraVideo = document.getElementById("cameraPreview");
         let isCoHostJoin = false;
@@ -108,11 +110,11 @@
         });
 
         async function startAudioStream() {
-            stopCurrentStream();
+            // stopCurrentStream();
             currentStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            const audioContext = new AudioContext();
+            audioContext = new AudioContext();
             const mediaStreamSource = audioContext.createMediaStreamSource(currentStream);
-            const processor = audioContext.createScriptProcessor(4096, 1, 1);
+            processor = audioContext.createScriptProcessor(4096, 1, 1);
 
             processor.onaudioprocess = (event) => {
                 const inputData = event.inputBuffer.getChannelData(0);
@@ -160,9 +162,9 @@
                 document.getElementById("toggleStream").innerText = "Switch to Audio";
                 socket.send(JSON.stringify({ type: "switching_to_screen_sharing", stream: "screen" }));
                 // Capture & send raw PCM audio
-                const audioContext = new AudioContext({ sampleRate: 16000 });
+                audioContext = new AudioContext({ sampleRate: 16000 });
                 const micSource = audioContext.createMediaStreamSource(micStream);
-                const processor = audioContext.createScriptProcessor(4096, 1, 1);
+                processor = audioContext.createScriptProcessor(4096, 1, 1);
 
                 micSource.connect(processor);
                 processor.connect(audioContext.destination);
@@ -188,7 +190,11 @@
             }
         }
 
-        function stopCurrentStream() {
+       function stopCurrentStream() {
+            if (socket) {
+                socket.send(JSON.stringify({ type: "stream_ended", event_id: liveId }));
+            }
+
             if (mediaRecorder) {
                 mediaRecorder.stop();
             }
@@ -198,8 +204,32 @@
             if (cameraStream) {
                 cameraStream.getTracks().forEach(track => track.stop());
             }
+
+            // Close WebSocket if open
+            if (socket) {
+                if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+                    socket.close();
+                }
+                socket = null;
+            }
+
+            // Stop the audio processor
+            if (processor) {
+                processor.disconnect();
+                processor.onaudioprocess = null; // Remove event listener
+            }
+
+            // Close the AudioContext
+            if (audioContext) {
+                audioContext.close().then(() => {
+                    audioContext = null;
+                }).catch(err => console.error("Error closing audio context:", err));
+            }
+
             cameraVideo.style.display = "none";
         }
+
+
 
         document.getElementById("toggleStream").addEventListener("click", async () => {
             if (isScreenSharing) {
@@ -330,12 +360,6 @@
 
         document.getElementById("stop").addEventListener("click", () => {
             stopCurrentStream();
-
-            if (socket) {
-                socket.send(JSON.stringify({ type: "stream_ended", event_id: liveId }));
-                setTimeout(() => socket.close(), 500);
-            }
-
             document.getElementById("start").disabled = false;
             document.getElementById("stop").disabled = true;
             document.getElementById("toggleStream").disabled = true;
