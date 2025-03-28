@@ -12,7 +12,7 @@
 # HOST ACTIONS
 | Action Type | Description | Params |
 |----------|--------|--------|
-| `Start Live Secure and valid Jwt token` | `To enable backend to validate user details from auth service` | token=${jwt} |
+| `Start Live Secure and valid Jwt token` | `To enable backend to validate user details from auth service` | `token=${jwt}` |
 | `Switching` | `Broadcaster can switch from audio to screen sharing back to audio in single event` | `{ type: "switching_to_audio", stream: "audio" }` or `{ type: "switching_to_screen_sharing", stream: "screen" }` |
 | `End Event` | `Host can end the live stream and event activities associated with that event ends.` | `{ type: "stream_ended", event_id: liveId }` |
 | `Invite Co-Host` | `Broadcaster can invite another user to be co-host to speak, Only then User {cohost} **MICROPHONE** will be enable and once he leave or remove, hIS **MICROPHONE** will disabled and only left ill speaker to listen to stream. 'FrontEnd Job' `| `{ type: "invite_cohost", user_id: userId }` |
